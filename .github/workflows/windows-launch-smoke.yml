@@ -1,0 +1,78 @@
+name: Windows Launch Smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    steps:
+      - name: Download latest portable zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = 'https://github.com/LBaquero33/selfscout-baseball-desktop-updates/releases/latest/download'
+          $latest = Invoke-WebRequest -Uri "$base/latest.yml" -UseBasicParsing
+          $content = $latest.Content
+
+          $versionMatch = [regex]::Match($content, '(?m)^version:\s*(.+)$')
+          if (-not $versionMatch.Success) { throw 'Could not parse version from latest.yml' }
+          $version = $versionMatch.Groups[1].Value.Trim()
+
+          $pathMatch = [regex]::Match($content, '(?m)^path:\s*(.+)$')
+          if (-not $pathMatch.Success) { throw 'Could not parse path from latest.yml' }
+          $exeName = $pathMatch.Groups[1].Value.Trim()
+          $zipName = $exeName -replace '\.exe$', '.zip'
+
+          if ($zipName -eq $exeName) { throw "Expected .exe in path, got: $exeName" }
+
+          $zipUrl = "$base/$zipName"
+          $zipOut = Join-Path $env:RUNNER_TEMP $zipName
+
+          Write-Host "Latest version: $version"
+          Write-Host "Downloading: $zipUrl"
+          Invoke-WebRequest -Uri $zipUrl -OutFile $zipOut -UseBasicParsing
+
+          $extractDir = Join-Path $env:RUNNER_TEMP 'selfscout-smoke'
+          if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
+          Expand-Archive -Path $zipOut -DestinationPath $extractDir
+
+          $appExe = Get-ChildItem -Path $extractDir -Filter 'SelfScout Baseball.exe' -Recurse | Select-Object -First 1
+          if (-not $appExe) {
+            Write-Host 'Files in extracted dir:'
+            Get-ChildItem -Recurse -Path $extractDir | Select-Object -First 200 | ForEach-Object { Write-Host $_.FullName }
+            throw 'Could not find SelfScout Baseball.exe in extracted zip'
+          }
+
+          "APP_EXE=$($appExe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Launch app and detect immediate crash
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:APP_EXE) { throw 'APP_EXE not set' }
+          Write-Host "Launching: $env:APP_EXE"
+
+          $proc = Start-Process -FilePath $env:APP_EXE -PassThru
+          Start-Sleep -Seconds 25
+
+          if ($proc.HasExited) {
+            Write-Host "Process exited early. ExitCode=$($proc.ExitCode)"
+
+            $candidateLogs = @(
+              "$env:APPDATA\SelfScout Baseball\logs",
+              "$env:APPDATA\selfscout-baseball-desktop\logs",
+              "$env:LOCALAPPDATA\selfscout-baseball-desktop-updater"
+            )
+            foreach ($logPath in $candidateLogs) {
+              if (Test-Path $logPath) {
+                Write-Host "Found logs at: $logPath"
+                Get-ChildItem -Recurse -Path $logPath | Select-Object -First 100 | ForEach-Object { Write-Host $_.FullName }
+              }
+            }
+
+            throw 'App exited within 25 seconds (startup failure)'
+          }
+
+          Write-Host 'App stayed alive for 25 seconds (startup smoke pass). Stopping process.'
+          Stop-Process -Id $proc.Id -Force
