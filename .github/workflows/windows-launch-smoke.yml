@@ -11,27 +11,17 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $base = 'https://github.com/LBaquero33/selfscout-baseball-desktop-updates/releases/latest/download'
-          $latest = Invoke-WebRequest -Uri "$base/latest.yml" -UseBasicParsing
-          $content = $latest.Content
+          $api = 'https://api.github.com/repos/LBaquero33/selfscout-baseball-desktop-updates/releases/latest'
+          $release = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'selfscout-smoke' }
 
-          $versionMatch = [regex]::Match($content, '(?m)^version:\s*(.+)$')
-          if (-not $versionMatch.Success) { throw 'Could not parse version from latest.yml' }
-          $version = $versionMatch.Groups[1].Value.Trim()
+          $zipAsset = $release.assets | Where-Object { $_.name -match '-x64\.zip$' } | Select-Object -First 1
+          if (-not $zipAsset) { throw 'Could not find x64 zip asset in latest release' }
 
-          $pathMatch = [regex]::Match($content, '(?m)^path:\s*(.+)$')
-          if (-not $pathMatch.Success) { throw 'Could not parse path from latest.yml' }
-          $exeName = $pathMatch.Groups[1].Value.Trim()
-          $zipName = $exeName -replace '\.exe$', '.zip'
+          Write-Host "Latest tag: $($release.tag_name)"
+          Write-Host "Downloading asset: $($zipAsset.name)"
 
-          if ($zipName -eq $exeName) { throw "Expected .exe in path, got: $exeName" }
-
-          $zipUrl = "$base/$zipName"
-          $zipOut = Join-Path $env:RUNNER_TEMP $zipName
-
-          Write-Host "Latest version: $version"
-          Write-Host "Downloading: $zipUrl"
-          Invoke-WebRequest -Uri $zipUrl -OutFile $zipOut -UseBasicParsing
+          $zipOut = Join-Path $env:RUNNER_TEMP $zipAsset.name
+          Invoke-WebRequest -Uri $zipAsset.browser_download_url -OutFile $zipOut -UseBasicParsing
 
           $extractDir = Join-Path $env:RUNNER_TEMP 'selfscout-smoke'
           if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
@@ -51,26 +41,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           if (-not $env:APP_EXE) { throw 'APP_EXE not set' }
-          Write-Host "Launching: $env:APP_EXE"
 
+          Write-Host "Launching: $env:APP_EXE"
           $proc = Start-Process -FilePath $env:APP_EXE -PassThru
           Start-Sleep -Seconds 25
 
           if ($proc.HasExited) {
             Write-Host "Process exited early. ExitCode=$($proc.ExitCode)"
-
-            $candidateLogs = @(
-              "$env:APPDATA\SelfScout Baseball\logs",
-              "$env:APPDATA\selfscout-baseball-desktop\logs",
-              "$env:LOCALAPPDATA\selfscout-baseball-desktop-updater"
-            )
-            foreach ($logPath in $candidateLogs) {
-              if (Test-Path $logPath) {
-                Write-Host "Found logs at: $logPath"
-                Get-ChildItem -Recurse -Path $logPath | Select-Object -First 100 | ForEach-Object { Write-Host $_.FullName }
-              }
-            }
-
             throw 'App exited within 25 seconds (startup failure)'
           }
 
